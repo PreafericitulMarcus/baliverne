@@ -23,35 +23,32 @@ class AudioEngine:
         self.block_size = block_size
         self.dtype = "int16"
 
-        # State flags
+        # Audio state
         self.is_running = False
         self.is_muted = False
         self.is_deafened = False
+        self.output_volume: float = 1.0
 
-        # Networking & Audio state
+        # Networking & Audio hardware handles
         self.sock: socket.socket | None = None
         self.stream: sd.Stream | None = None
         self.audio_buffer = queue.Queue(maxsize=100)
         self.receiver_thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Starts network socket, listener thread, and audio hardware stream."""
         if self.is_running:
             return
 
         self.is_running = True
 
-        # 1. Setup UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", self.local_port))
 
-        # 2. Run socket receiver thread
         self.receiver_thread = threading.Thread(
             target=self._network_receive_loop, daemon=True
         )
         self.receiver_thread.start()
 
-        # 3. Start audio stream
         self.stream = sd.Stream(
             samplerate=self.sample_rate,
             channels=self.channels,
@@ -62,24 +59,20 @@ class AudioEngine:
         self.stream.start()
 
     def stop(self) -> None:
-        """Stops audio stream and closes the socket."""
         if not self.is_running:
             return
 
         self.is_running = False
 
-        # Close audio stream
         if self.stream:
             self.stream.stop()
             self.stream.close()
             self.stream = None
 
-        # Close socket (breaks listener loop)
         if self.sock:
             self.sock.close()
             self.sock = None
 
-        # Clear buffer
         while not self.audio_buffer.empty():
             try:
                 self.audio_buffer.get_nowait()
@@ -94,6 +87,9 @@ class AudioEngine:
         self.is_deafened = not self.is_deafened
         return self.is_deafened
 
+    def set_volume(self, volume: float) -> None:
+        self.output_volume = max(0.0, min(volume, 1.5))
+
     def _network_receive_loop(self) -> None:
         while self.is_running and self.sock:
             try:
@@ -104,22 +100,28 @@ class AudioEngine:
                 break
 
     def _audio_callback(self, indata, outdata, frames, time_info, status):
-        # 1. Mic Outbound: Send only if not muted and network is active
+        # 1. Microphone Outbound
         if self.is_running and self.sock and not self.is_muted:
             try:
                 self.sock.sendto(indata.tobytes(), (self.target_ip, self.target_port))
             except OSError:
                 pass
 
-        # 2. Speaker Inbound: Play only if not deafened
-        if self.is_deafened:
+        # 2. Speaker Inbound
+        if self.is_deafened or self.output_volume == 0.0:
             outdata.fill(0)
             return
 
         try:
             packet = self.audio_buffer.get_nowait()
-            outdata[:] = np.frombuffer(packet, dtype=self.dtype).reshape(
+            pcm_data = np.frombuffer(packet, dtype=self.dtype).reshape(
                 -1, self.channels
             )
+
+            if self.output_volume != 1.0:
+                scaled = pcm_data.astype(np.float32) * self.output_volume
+                outdata[:] = np.clip(scaled, -32768, 32767).astype(np.dtype(self.dtype))
+            else:
+                outdata[:] = pcm_data
         except queue.Empty:
             outdata.fill(0)

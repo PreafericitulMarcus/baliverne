@@ -1,5 +1,5 @@
 [project]
-name = "converse"
+name = "baliverne"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -8,6 +8,7 @@ dependencies = [
     "aiortc>=1.15.0",
     "customtkinter>=6.0.0",
     "numpy>=2.5.4",
+    "pynput>=1.8.2",
     "sounddevice>=0.5.6",
     "websockets>=17.3",
 ]

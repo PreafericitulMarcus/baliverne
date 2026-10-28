@@ -1,6 +1,7 @@
 import argparse
 from audio_engine import AudioEngine
 from ui import VoiceApp
+import logging
 
 
 def main():
@@ -20,6 +21,13 @@ def main():
 
     app = VoiceApp(engine=engine)
     app.mainloop()
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 if __name__ == "__main__":
