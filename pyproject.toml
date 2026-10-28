@@ -1,0 +1,13 @@
+[project]
+name = "converse"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiortc>=1.15.0",
+    "customtkinter>=6.0.0",
+    "numpy>=2.5.4",
+    "sounddevice>=0.5.6",
+    "websockets>=17.3",
+]
