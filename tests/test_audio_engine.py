@@ -1,14 +1,14 @@
-import pytest
-import queue
 import numpy as np
 import opuslib_next as opus
+import pytest
+
 from audio_engine import AudioEngine
 
 
 @pytest.fixture
 def engine():
     """Provides a fresh AudioEngine instance for each test."""
-    return AudioEngine(local_port=5001, target_port=5002)
+    return AudioEngine(client_id=1, local_port=5001, target_port=5002)
 
 
 def test_initial_state(engine):

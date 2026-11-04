@@ -1,17 +1,26 @@
+import logging
+import os
 import queue
 import socket
 import threading
-import logging
+
+import nacl.exceptions
+import nacl.secret
 import numpy as np
-import sounddevice as sd
 import opuslib_next as opus
+import sounddevice as sd
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
+SUPER_SECRET_KEY = bytes.fromhex(os.environ["SUPER_SECRET_KEY"])
 
 
 class AudioEngine:
     def __init__(
         self,
+        client_id: int,  # 1 for A, 2 for B
         local_port: int = 5001,
         target_ip: str = "127.0.0.1",
         target_port: int = 5002,
@@ -19,6 +28,7 @@ class AudioEngine:
         channels: int = 1,
         block_size: int = 960,  # 48 kHz * 20ms
     ):
+        self.client_id = client_id
         self.local_port = local_port
         self.target_ip = target_ip
         self.target_port = target_port
@@ -45,8 +55,15 @@ class AudioEngine:
         self.receiver_thread: threading.Thread | None = None
         self.sender_thread: threading.Thread | None = None
 
+        # Encoder & decoder
         self.encoder = None
         self.decoder = None
+
+        # Cryptography
+        self.box = nacl.secret.Aead(SUPER_SECRET_KEY)
+        self.aad = b"baliverne_voice_session_v1"
+        self.send_seq = 0
+        self.recv_highest_seq = -1
 
     def start(self) -> None:
         if self.is_running:
@@ -56,6 +73,9 @@ class AudioEngine:
             f"Starting AudioEngine on port {self.local_port}, targeting {self.target_ip}:{self.target_port}"
         )
         self.is_running = True
+
+        self.send_seq = 0
+        self.recv_highest_seq = -1
 
         self.encoder = opus.Encoder(
             self.sample_rate, self.channels, opus.APPLICATION_VOIP
@@ -132,15 +152,33 @@ class AudioEngine:
             try:
                 data, _ = self.sock.recvfrom(4096)
 
+                # Minimum viable packet length (24 byte sequence + 16 byte MAC tag + Opus data)
+                if len(data) < 40:
+                    continue
+
+                nonce = data[:24]
+                ciphertext = data[24:]
+                seq = int.from_bytes(nonce[16:], "little")
+
+                if seq <= self.recv_highest_seq:
+                    logger.debug(f"Dropped delayed/replayed packet (Seq {seq})")
+                    continue
+
+                decrypted_receive = self.box.decrypt(ciphertext, self.aad, nonce=nonce)
+
+                self.recv_highest_seq = seq
+
                 if self.decoder is None:
                     continue
 
-                decoded_data = self.decoder.decode(data, self.block_size)
+                decoded_data = self.decoder.decode(decrypted_receive, self.block_size)
 
                 if not self.inbound_buffer.full():
                     self.inbound_buffer.put_nowait(decoded_data)
                 else:
                     logger.warning("Inbound buffer full, dropping frame.")
+            except nacl.exceptions.CryptoError:
+                logger.warning("Packet decyption failed (tampered or wrong key).")
             except queue.Full:
                 pass
             except opus.OpusError as ope:
@@ -163,7 +201,20 @@ class AudioEngine:
                     logger.debug(
                         f"Opus: {len(raw_pcm)} bytes -> {len(encoded_data)} bytes"
                     )
-                    self.sock.sendto(encoded_data, (self.target_ip, self.target_port))
+
+                    self.send_seq += 1
+
+                    # 12 bytes (Padding) + 4 bytes (Client ID) + 8 bytes (Sequence) = 24-byte Nonce
+                    padding = b"\x00" * 12
+                    client_bytes = self.client_id.to_bytes(4, "little")
+                    seq_bytes = self.send_seq.to_bytes(8, "little")
+                    nonce = padding + client_bytes + seq_bytes
+
+                    encrypted_send = self.box.encrypt(
+                        encoded_data, self.aad, nonce=nonce
+                    )
+
+                    self.sock.sendto(encrypted_send, (self.target_ip, self.target_port))
             except queue.Empty:
                 continue
             except opus.OpusError as ope:
