@@ -1,7 +1,15 @@
 import argparse
-from audio_engine import AudioEngine
-from ui import VoiceApp
 import logging
+
+from audio_engine import AudioEngine
+from signaling_client import SignalingClient
+from ui import VoiceApp
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def main():
@@ -10,24 +18,27 @@ def main():
         "--user",
         choices=["1", "2"],
         default="1",
-        help="Run as User 1 (port 5001 -> 5002) or User 2 (port 5002 -> 5001)",
+        help="Run as User 1 (port 5001) or User 2 (port 5002)",
     )
     args = parser.parse_args()
 
-    if args.user == "1":
-        engine = AudioEngine(local_port=5001, target_ip="127.0.0.1", target_port=5002)
-    else:
-        engine = AudioEngine(local_port=5002, target_ip="127.0.0.1", target_port=5001)
+    client_id = int(args.user)
+    local_port = 5000 + client_id
 
-    app = VoiceApp(engine=engine)
+    # 1. Initialize Audio Engine (Targets are now dynamically set during handshake)
+    engine = AudioEngine(client_id=client_id, local_port=local_port)
+
+    # 2. Initialize Signaling Client
+    sig_client = SignalingClient(client_id=client_id, server_url="ws://127.0.0.1:8765")
+
+    # 3. Pass both to your GUI
+    app = VoiceApp(engine=engine, sig_client=sig_client)
+
+    # 4. Start the background signaling thread
+    sig_client.start()
+
+    # 5. Start the GUI blocking loop
     app.mainloop()
-
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s",
-    datefmt="%H:%M:%S",
-)
 
 
 if __name__ == "__main__":

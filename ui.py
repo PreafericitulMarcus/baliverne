@@ -1,7 +1,10 @@
-import customtkinter as ctk
-from audio_engine import AudioEngine
-from pynput import keyboard
 import logging
+
+import customtkinter as ctk
+from pynput import keyboard
+
+from audio_engine import AudioEngine
+from signaling_client import SignalingClient
 
 logger = logging.getLogger(__name__)
 
@@ -10,9 +13,15 @@ ctk.set_default_color_theme("green")
 
 
 class VoiceApp(ctk.CTk):
-    def __init__(self, engine: AudioEngine):
+    def __init__(self, engine: AudioEngine, sig_client: SignalingClient):
         super().__init__()
         self.engine = engine
+        self.sig_client = sig_client
+
+        # Bind background network events to UI handlers
+        self.sig_client.on_presence_update = self.handle_presence
+        self.sig_client.on_call_offer = self.handle_offer
+        self.sig_client.on_call_answer = self.handle_answer
 
         self.title("Baliverne")
         self.geometry("420x260")
@@ -117,34 +126,96 @@ class VoiceApp(ctk.CTk):
         self.global_listener.daemon = True
         self.global_listener.start()
 
+    # --- Network Handshake Handlers (Running on Background Thread) ---
+
+    def handle_presence(self, online_users):
+        logger.info(f"Online users updated: {online_users}")
+
+    def handle_offer(self, data):
+        """Triggered when the other user calls you."""
+
+        def execute_ui_update():
+            caller_id = data["source_id"]
+            peer_ip = data["ip"]
+            peer_port = data["port"]
+            logger.info(f"Incoming call from {caller_id}...")
+
+            # 1. Discover our own IP/Port to send back
+            my_ip, my_port = self.engine.bind_and_discover()
+
+            # 2. Reply with our coordinates
+            self.sig_client.send_message(
+                target_id=caller_id,
+                msg_type="call_answer",
+                payload={"ip": my_ip, "port": my_port},
+            )
+
+            # 3. Punch hole and start audio engine
+            self.engine.start(peer_ip, peer_port)
+            self._set_ui_connected()
+
+        self.after(0, execute_ui_update)
+
+    def handle_answer(self, data):
+        """Triggered when the peer accepts your call offer."""
+
+        def execute_ui_update():
+            peer_ip = data["ip"]
+            peer_port = data["port"]
+
+            # Punch hole and start audio engine
+            self.engine.start(peer_ip, peer_port)
+            self._set_ui_connected()
+
+        self.after(0, execute_ui_update)
+
+    # --- UI Action Handlers (Running on Main Thread) ---
+
+    def on_connect_click(self) -> None:
+        if not self.engine.is_running:
+            logger.info("Initiating call...")
+            self.status_value.configure(text="Calling...", text_color="#f39c12")
+            self.connect_voice_button.configure(
+                text="Cancel", fg_color="#e74c3c", hover_color="#c0392b"
+            )
+
+            # For this 2-person setup: if I am 1, call 2. If I am 2, call 1.
+            target_id = 2 if self.engine.client_id == 1 else 1
+
+            try:
+                my_ip, my_port = self.engine.bind_and_discover()
+                self.sig_client.send_message(
+                    target_id=target_id,
+                    msg_type="call_offer",
+                    payload={"ip": my_ip, "port": my_port},
+                )
+            except Exception as e:
+                logger.error(f"Failed to initiate call: {e}")
+                self._set_ui_disconnected()
+        else:
+            logger.info("Disconnecting call...")
+            self.engine.stop()
+            self._set_ui_disconnected()
+
+    def _set_ui_connected(self):
+        self.status_value.configure(text="Connected", text_color="#2ecc71")
+        self.connect_voice_button.configure(
+            text="Leave Voice", fg_color="#e74c3c", hover_color="#c0392b"
+        )
+
+    def _set_ui_disconnected(self):
+        self.status_value.configure(text="Offline", text_color="#e74c3c")
+        self.connect_voice_button.configure(
+            text="Join Voice", fg_color="#2ecc71", hover_color="#27ae60"
+        )
+
     def on_volume_change(self, value: float) -> None:
         gain = value / 100.0
         self.engine.set_volume(gain)
         self.volume_label.configure(text=f"Output Volume: {int(value)}%")
-        logger.debug(f"Volume ajusted to: {int(value)}%")
-
-    def on_connect_click(self) -> None:
-        if not self.engine.is_running:
-            logger.info("Join Call button pressed. Initializing engine")
-            self.engine.start()
-            logger.info("Call connected ok")
-            self.status_value.configure(text="Connected", text_color="#2ecc71")
-            self.connect_voice_button.configure(
-                text="Leave Voice", fg_color="#e74c3c", hover_color="#c0392b"
-            )
-        else:
-            logger.info("Disconnect Call button pressed. Stopping engine")
-            self.engine.stop()
-            logger.info("Bye!")
-            self.status_value.configure(text="Offline", text_color="#e74c3c")
-            self.connect_voice_button.configure(
-                text="Join Voice", fg_color="#2ecc71", hover_color="#27ae60"
-            )
 
     def on_mute_click(self) -> None:
         muted = self.engine.toggle_mute()
-        state = "Muted" if muted else "NOT Muted"
-        logger.info(f"Mute toggled -> {state}")
         if muted:
             self.mute_voice_button.configure(
                 text="Unmute", fg_color="#c0392b", hover_color="#962d22"
@@ -156,8 +227,6 @@ class VoiceApp(ctk.CTk):
 
     def on_deafen_click(self) -> None:
         deafened = self.engine.toggle_deafen()
-        state = "Deafened" if deafened else "NOT Deafened"
-        logger.info(f"Deafen toggled -> {state}")
         if deafened:
             self.deafen_voice_button.configure(
                 text="Undeafen", fg_color="#c0392b", hover_color="#962d22"
@@ -168,7 +237,5 @@ class VoiceApp(ctk.CTk):
             )
 
     def on_close(self) -> None:
-        """Ensures background audio threads and sockets close on window exit."""
         self.engine.stop()
         self.destroy()
-        logger.info("Window closed. See you later!")

@@ -11,6 +11,8 @@ import opuslib_next as opus
 import sounddevice as sd
 from dotenv import load_dotenv
 
+from stun_client import discover_public_coordinates
+
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -22,16 +24,14 @@ class AudioEngine:
         self,
         client_id: int,  # 1 for A, 2 for B
         local_port: int = 5001,
-        target_ip: str = "127.0.0.1",
-        target_port: int = 5002,
         sample_rate: int = 48000,
         channels: int = 1,
         block_size: int = 960,  # 48 kHz * 20ms
     ):
         self.client_id = client_id
         self.local_port = local_port
-        self.target_ip = target_ip
-        self.target_port = target_port
+        self.target_ip: str | None = None
+        self.target_port: int | None = None
         self.sample_rate = sample_rate
         self.channels = channels
         self.block_size = block_size
@@ -65,7 +65,17 @@ class AudioEngine:
         self.send_seq = 0
         self.recv_highest_seq = -1
 
-    def start(self) -> None:
+    def bind_and_discover(self) -> tuple[str, int]:
+        if self.sock is None:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(("0.0.0.0", self.local_port))
+
+        logger.info("Querying STUN for public coordinates...")
+        public_ip, public_port = discover_public_coordinates(self.sock)
+        return public_ip, public_port
+
+    def start(self, peer_ip: str, peer_port: int) -> None:
         if self.is_running:
             return
 
@@ -74,6 +84,16 @@ class AudioEngine:
         )
         self.is_running = True
 
+        if self.sock is None:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind(("0.0.0.0", self.local_port))
+
+        self.target_ip = peer_ip
+        self.target_port = peer_port
+
+        logger.info(f"Punching UDP hole to {self.target_ip}:{self.target_port}")
+        self.sock.sendto(b"PUNCH", (self.target_ip, self.target_port))
+
         self.send_seq = 0
         self.recv_highest_seq = -1
 
@@ -81,9 +101,6 @@ class AudioEngine:
             self.sample_rate, self.channels, opus.APPLICATION_VOIP
         )
         self.decoder = opus.Decoder(self.sample_rate, self.channels)
-
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("0.0.0.0", self.local_port))
 
         self.receiver_thread = threading.Thread(
             target=self._network_receive_loop, daemon=True
@@ -148,9 +165,18 @@ class AudioEngine:
 
     def _network_receive_loop(self) -> None:
         logger.debug("Receiver thread started.")
+
+        if self.sock is None:
+            return
+        self.sock.settimeout(0.2)
+
         while self.is_running and self.sock:
             try:
                 data, _ = self.sock.recvfrom(4096)
+
+                if data == b"PUNCH":
+                    logger.debug("Received peer's hole-punch packet")
+                    continue
 
                 # Minimum viable packet length (24 byte sequence + 16 byte MAC tag + Opus data)
                 if len(data) < 40:
@@ -177,6 +203,8 @@ class AudioEngine:
                     self.inbound_buffer.put_nowait(decoded_data)
                 else:
                     logger.warning("Inbound buffer full, dropping frame.")
+            except TimeoutError:
+                continue
             except nacl.exceptions.CryptoError:
                 logger.warning("Packet decyption failed (tampered or wrong key).")
             except queue.Full:
@@ -198,9 +226,9 @@ class AudioEngine:
 
                 if not self.is_muted and self.encoder is not None:
                     encoded_data = self.encoder.encode(raw_pcm, self.block_size)
-                    logger.debug(
-                        f"Opus: {len(raw_pcm)} bytes -> {len(encoded_data)} bytes"
-                    )
+                    # logger.debug(
+                    #     f"Opus: {len(raw_pcm)} bytes -> {len(encoded_data)} bytes"
+                    # )
 
                     self.send_seq += 1
 
