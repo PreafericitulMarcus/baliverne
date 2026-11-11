@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import queue
@@ -6,22 +7,20 @@ import sys
 import threading
 
 import nacl.exceptions
-import nacl.secret
 import numpy as np
-import opuslib_next as opus
 import sounddevice as sd
-from dotenv import load_dotenv
+from nacl.public import Box, PrivateKey, PublicKey
+from nacl.secret import Aead
 
 from stun_client import discover_public_coordinates
-
-logger = logging.getLogger(__name__)
-
-load_dotenv()
-SUPER_SECRET_KEY = bytes.fromhex(os.environ["SUPER_SECRET_KEY"])
 
 if sys.platform == "win32":
     basedir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     os.add_dll_directory(basedir)
+
+import opuslib_next as opus
+
+logger = logging.getLogger(__name__)
 
 
 class AudioEngine:
@@ -47,6 +46,7 @@ class AudioEngine:
         self.is_muted = False
         self.is_deafened = False
         self.output_volume: float = 1.0
+        self.input_volume: float = 1.0
 
         # Networking & Audio hardware handles
         self.sock: socket.socket | None = None
@@ -65,7 +65,8 @@ class AudioEngine:
         self.decoder = None
 
         # Cryptography
-        self.box = nacl.secret.Aead(SUPER_SECRET_KEY)
+        self.box: Aead | None = None
+        self.private_key: PrivateKey | None = None
         self.aad = b"baliverne_voice_session_v1"
         self.send_seq = 0
         self.recv_highest_seq = -1
@@ -164,9 +165,11 @@ class AudioEngine:
         logger.info(f"Audio deafened: {self.is_deafened}")
         return self.is_deafened
 
-    def set_volume(self, volume: float) -> None:
+    def set_output_volume(self, volume: float) -> None:
         self.output_volume = max(0.0, min(volume, 1.5))
-        logger.debug(f"Volume adjusted to {self.output_volume:.2f}")
+
+    def set_input_volume(self, gain: float) -> None:
+        self.input_volume = max(0.0, min(gain, 2.0))
 
     def _network_receive_loop(self) -> None:
         logger.debug("Receiver thread started.")
@@ -195,6 +198,8 @@ class AudioEngine:
                     logger.debug(f"Dropped delayed/replayed packet (Seq {seq})")
                     continue
 
+                if self.box is None:
+                    continue
                 decrypted_receive = self.box.decrypt(ciphertext, self.aad, nonce=nonce)
 
                 self.recv_highest_seq = seq
@@ -243,6 +248,8 @@ class AudioEngine:
                     seq_bytes = self.send_seq.to_bytes(8, "little")
                     nonce = padding + client_bytes + seq_bytes
 
+                    if self.box is None:
+                        continue
                     encrypted_send = self.box.encrypt(
                         encoded_data, self.aad, nonce=nonce
                     )
@@ -263,9 +270,16 @@ class AudioEngine:
             logger.warning(f"Audio callback status: {status}")
 
         # 1. Microphone Outbound
-        if self.is_running and not self.is_muted:
+        if self.is_running and not self.is_muted and self.input_volume > 0.0:
             try:
-                self.outbound_buffer.put_nowait(indata.tobytes())
+                if self.input_volume != 1.0:
+                    scaled_mic = indata.astype(np.float32) * self.input_volume
+                    mic_bytes = np.clip(scaled_mic, -32768, 32767).astype(
+                        np.dtype(self.dtype)
+                    )
+                else:
+                    mic_bytes = indata.tobytes()
+                self.outbound_buffer.put_nowait(mic_bytes)
             except queue.Full:
                 pass  # Network thread is lagging behind; drop mic frame
 
@@ -287,3 +301,14 @@ class AudioEngine:
                 outdata[:] = pcm_data
         except queue.Empty:
             outdata.fill(0)
+
+    def generate_keypair(self) -> str:
+        self.private_key = PrivateKey.generate()
+        return base64.b64encode(bytes(self.private_key.public_key)).decode("utf-8")
+
+    def derive_shared_key(self, peer_pubkey_b64: str) -> None:
+        if self.private_key is None:
+            raise RuntimeError("Private key not generated before deriving shared key")
+        peer_pubkey = PublicKey(base64.b64decode(peer_pubkey_b64))
+        shared_box = Box(self.private_key, peer_pubkey)
+        self.box = Aead(shared_box.shared_key())
