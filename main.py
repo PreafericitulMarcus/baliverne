@@ -1,15 +1,42 @@
 import argparse
 import logging
+import sys
 
 from audio_engine import AudioEngine
 from signaling_client import SignalingClient
 from ui import VoiceApp
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s",
-    datefmt="%H:%M:%S",
-)
+
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
+    }
+    RESET = "\033[0m"
+
+    def __init__(self, fmt=None, datefmt=None):
+        super().__init__(fmt=fmt, datefmt=datefmt)
+
+    def format(self, record):
+        log_color = self.COLORS.get(record.levelname, self.RESET)
+
+        log_fmt = (
+            f"{log_color}%(levelname)-8s{self.RESET} "
+            f"\033[90m%(filename)s:%(lineno)-4d{self.RESET} "
+            f"\033[34m[%(threadName)s]{self.RESET} "
+            f"%(message)s"
+        )
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColoredFormatter())
+
+logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 
 
 def main():

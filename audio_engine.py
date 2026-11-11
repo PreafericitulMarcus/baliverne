@@ -16,6 +16,7 @@ from stun_client import discover_public_coordinates
 
 if sys.platform == "win32":
     basedir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    os.environ["PATH"] = basedir + os.pathsep + os.environ.get("PATH", "")
     os.add_dll_directory(basedir)
 
 import opuslib_next as opus
@@ -40,6 +41,10 @@ class AudioEngine:
         self.channels = channels
         self.block_size = block_size
         self.dtype = "int16"
+
+        self.devices: dict | None = sd.query_devices()
+        self.input_device_index: int | None = None
+        self.output_device_index: int | None = None
 
         # Audio state
         self.is_running = False
@@ -109,12 +114,12 @@ class AudioEngine:
         self.decoder = opus.Decoder(self.sample_rate, self.channels)
 
         self.receiver_thread = threading.Thread(
-            target=self._network_receive_loop, daemon=True
+            target=self._network_receive_loop, daemon=True, name="AudioReceiver"
         )
         self.receiver_thread.start()
 
         self.sender_thread = threading.Thread(
-            target=self._network_send_loop, daemon=True
+            target=self._network_send_loop, daemon=True, name="AudioSender"
         )
         self.sender_thread.start()
 
@@ -123,6 +128,10 @@ class AudioEngine:
             channels=self.channels,
             dtype=self.dtype,
             blocksize=self.block_size,
+            device=(
+                getattr(self, "input_device_index", None),
+                getattr(self, "output_device_index", None),
+            ),
             callback=self._audio_callback,
         )
         self.stream.start()
@@ -269,13 +278,18 @@ class AudioEngine:
         if status:
             logger.warning(f"Audio callback status: {status}")
 
+        int16_lower_bound = -32768
+        int16_upper_bound = 32767
+
         # 1. Microphone Outbound
         if self.is_running and not self.is_muted and self.input_volume > 0.0:
             try:
                 if self.input_volume != 1.0:
                     scaled_mic = indata.astype(np.float32) * self.input_volume
-                    mic_bytes = np.clip(scaled_mic, -32768, 32767).astype(
-                        np.dtype(self.dtype)
+                    mic_bytes = (
+                        np.clip(scaled_mic, int16_lower_bound, int16_upper_bound)
+                        .astype(np.dtype(self.dtype))
+                        .tobytes()
                     )
                 else:
                     mic_bytes = indata.tobytes()
@@ -296,7 +310,9 @@ class AudioEngine:
 
             if self.output_volume != 1.0:
                 scaled = pcm_data.astype(np.float32) * self.output_volume
-                outdata[:] = np.clip(scaled, -32768, 32767).astype(np.dtype(self.dtype))
+                outdata[:] = np.clip(
+                    scaled, int16_lower_bound, int16_upper_bound
+                ).astype(np.dtype(self.dtype))
             else:
                 outdata[:] = pcm_data
         except queue.Empty:
@@ -312,3 +328,70 @@ class AudioEngine:
         peer_pubkey = PublicKey(base64.b64decode(peer_pubkey_b64))
         shared_box = Box(self.private_key, peer_pubkey)
         self.box = Aead(shared_box.shared_key())
+
+    def get_input_devices(self) -> list[str]:
+        if self.devices is None:
+            raise RuntimeError("No input device detected")
+        input_devices = [
+            d["name"]
+            for d in self.devices
+            if d["max_input_channels"] > 0 and not d["name"].startswith("hw:")
+        ]
+        if not input_devices:
+            input_devices = ["Default Microphone"]
+        return input_devices
+
+    def get_output_devices(self) -> list[str]:
+        if self.devices is None:
+            raise RuntimeError("No input device detected")
+        output_devices = [
+            d["name"]
+            for d in self.devices
+            if d["max_output_channels"] > 0 and not d["name"].startswith("hw:")
+        ]
+        if not output_devices:
+            output_devices = ["Default Speaker"]
+        return output_devices
+
+    def set_input_device(self, device_name: str) -> None:
+        if self.devices is None:
+            raise RuntimeError("No input device detected")
+        for idx, d in enumerate(self.devices):
+            if d["name"] == device_name and d["max_input_channels"] > 0:
+                self.input_device_index = idx
+                logger.info(f"Set input device to [{idx}]: {device_name}")
+                self._restart_stream_if_running()
+                break
+
+    def set_output_device(self, device_name: str) -> None:
+        if self.devices is None:
+            raise RuntimeError("No input device detected")
+        for idx, d in enumerate(self.devices):
+            if d["name"] == device_name and d["max_output_channels"] > 0:
+                self.output_device_index = idx
+                logger.info(f"Set output device to [{idx}]: {device_name}")
+                self._restart_stream_if_running()
+                break
+
+    def _restart_stream_if_running(self) -> None:
+        if self.is_running and self.stream:
+            logger.info("Restarting audio stream with new device selection...")
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                logger.error(f"Error stopping stream during device change: {e}")
+
+            self.stream = sd.Stream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype=self.dtype,
+                blocksize=self.block_size,
+                device=(
+                    getattr(self, "input_device_index", None),
+                    getattr(self, "output_device_index", None),
+                ),
+                callback=self._audio_callback,
+            )
+            self.stream.start()
+            logger.info("Audio stream successfully restarted with new devices.")

@@ -1,4 +1,6 @@
+import json
 import logging
+from pathlib import Path
 
 import customtkinter as ctk
 from pynput import keyboard
@@ -10,6 +12,130 @@ logger = logging.getLogger(__name__)
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
+
+CONFIG_PATH = Path("config.json")
+DEFAULT_CONFIG = {"microphone": None, "speaker": None}
+
+
+def load_saved_settings() -> dict:
+    if not CONFIG_PATH.exists():
+        logger.info("No config.json found. Generating default configuration file...")
+        try:
+            CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
+        except Exception as e:
+            logger.error(f"Failed to create default config.json: {e}")
+
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except Exception as e:
+        logger.warning(f"Corrupt config.json detected, resetting to defaults: {e}")
+        return DEFAULT_CONFIG.copy()
+
+
+def save_setting(key: str, value: str) -> None:
+    config = load_saved_settings()
+    config[key] = value
+    try:
+        CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    except Exception as e:
+        logger.error(f"Failed to save config: {e}")
+
+
+class SettingsWindow(ctk.CTkToplevel):
+    def __init__(self, parent, engine: AudioEngine):
+        super().__init__(parent)
+        self.engine = engine
+        self.config = load_saved_settings()
+
+        self.title("Baliverne - Settings")
+        self.geometry("420x300")
+        self.resizable(False, False)
+
+        # Make window modal (optional, keeps focus on settings)
+        self.grab_set()
+
+        # Header Label
+        self.header_label = ctk.CTkLabel(
+            master=self,
+            text="Audio Device Settings",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        self.header_label.pack(pady=(20, 15))
+
+        input_devices = self.engine.get_input_devices()
+        output_devices = self.engine.get_output_devices()
+
+        # --- Microphone Selection ---
+        self.mic_frame = ctk.CTkFrame(master=self, fg_color="transparent")
+        self.mic_frame.pack(pady=10, padx=30, fill="x")
+
+        self.mic_label = ctk.CTkLabel(
+            master=self.mic_frame,
+            text="Microphone (Input)",
+            font=ctk.CTkFont(size=13),
+            text_color="gray",
+        )
+        self.mic_label.pack(anchor="w")
+
+        self.mic_dropdown = ctk.CTkOptionMenu(
+            master=self.mic_frame,
+            values=input_devices,
+            command=self.on_mic_select,
+            width=360,
+        )
+        self.mic_dropdown.pack(pady=(5, 0), fill="x")
+        saved_mic = self.config.get("microphone")
+        if saved_mic in input_devices:
+            self.mic_dropdown.set(saved_mic)
+            self.engine.set_input_device(saved_mic)
+        else:
+            self.mic_dropdown.set(input_devices[0])
+
+        # --- Speaker Selection ---
+        self.speaker_frame = ctk.CTkFrame(master=self, fg_color="transparent")
+        self.speaker_frame.pack(pady=10, padx=30, fill="x")
+
+        self.speaker_label = ctk.CTkLabel(
+            master=self.speaker_frame,
+            text="Speaker / Headphones (Output)",
+            font=ctk.CTkFont(size=13),
+            text_color="gray",
+        )
+        self.speaker_label.pack(anchor="w")
+
+        self.speaker_dropdown = ctk.CTkOptionMenu(
+            master=self.speaker_frame,
+            values=output_devices,
+            command=self.on_speaker_select,
+            width=360,
+        )
+        self.speaker_dropdown.pack(pady=(5, 0), fill="x")
+        saved_speaker = self.config.get("speaker")
+        if saved_speaker in output_devices:
+            self.speaker_dropdown.set(saved_speaker)
+            self.engine.set_output_device(saved_speaker)
+        else:
+            self.speaker_dropdown.set(output_devices[0])
+        # --- Close Button ---
+        self.close_button = ctk.CTkButton(
+            master=self,
+            text="Save & Close",
+            width=120,
+            command=self.destroy,
+            fg_color="#2ecc71",
+            hover_color="#27ae60",
+        )
+        self.close_button.pack(pady=(15, 20))
+
+    def on_mic_select(self, choice: str) -> None:
+        logger.info(f"Selected microphone: {choice}")
+        save_setting("microphone", choice)
+        self.engine.set_input_device(choice)
+
+    def on_speaker_select(self, choice: str) -> None:
+        logger.info(f"Selected speaker: {choice}")
+        save_setting("speaker", choice)
+        self.engine.set_output_device(choice)
 
 
 class VoiceApp(ctk.CTk):
@@ -26,6 +152,13 @@ class VoiceApp(ctk.CTk):
         self.title("Baliverne")
         self.geometry("420x340")
         self.resizable(False, False)
+
+        # Open Setting Window
+        self.settings_button = ctk.CTkButton(
+            master=self, text="Settings", command=self.open_settings
+        )
+        self.settings_button.pack(side="top", padx=20, pady=20)
+        self.settings_window = None
 
         # Status Container
         self.status_frame = ctk.CTkFrame(master=self, fg_color="transparent")
@@ -133,6 +266,12 @@ class VoiceApp(ctk.CTk):
 
         self._start_global_keybinds()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def open_settings(self) -> None:
+        if self.settings_window is None or not self.settings_window.winfo_exists():
+            self.settings_window = SettingsWindow(self, self.engine)
+        else:
+            self.settings_window.focus()
 
     def _start_global_keybinds(self) -> None:
         def trigger(callback):

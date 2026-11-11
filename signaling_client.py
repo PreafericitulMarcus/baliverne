@@ -22,7 +22,9 @@ class SignalingClient:
         self.on_call_answer: Callable[[dict], None] | None = None
 
         # Run the async WebSocket loop in a background daemon thread
-        self.thread = threading.Thread(target=self._start_loop, daemon=True)
+        self.thread = threading.Thread(
+            target=self._start_loop, daemon=True, name="SignalingSocket"
+        )
 
     def start(self) -> None:
         self.thread.start()
