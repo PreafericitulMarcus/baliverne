@@ -2,6 +2,7 @@ import logging
 import os
 import queue
 import socket
+import sys
 import threading
 
 import nacl.exceptions
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 SUPER_SECRET_KEY = bytes.fromhex(os.environ["SUPER_SECRET_KEY"])
+
+if sys.platform == "win32":
+    basedir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    os.add_dll_directory(basedir)
 
 
 class AudioEngine:
