@@ -29,7 +29,9 @@ def main():
     engine = AudioEngine(client_id=client_id, local_port=local_port)
 
     # 2. Initialize Signaling Client
-    sig_client = SignalingClient(client_id=client_id, server_url="ws://127.0.0.1:8765")
+    sig_client = SignalingClient(
+        client_id=client_id, server_url="wss://baliverne.red8red.com"
+    )
 
     # 3. Pass both to your GUI
     app = VoiceApp(engine=engine, sig_client=sig_client)
